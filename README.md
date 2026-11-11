@@ -1,6 +1,6 @@
 # BIM Clash Auditor
 
-> **Open-source federated 3D IFC & BCF clash inspection platform** with an interactive Three.js / That Open Components web viewer, a native Windows WPF + WebView2 desktop host, and an automated BCF-to-Word/PDF audit report generator.
+> **Free, offline-first OpenBIM alternative to cloud BIM coordination viewers (such as Trimble Connect) for federated 3D IFC & BCF clash inspection** — featuring a Three.js / That Open Components web viewer, a native Windows WPF + WebView2 desktop host, and an automated BCF-to-Word/PDF audit report generator.
 
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=github-actions&logoColor=white)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -14,7 +14,7 @@
   - Load multiple discipline IFC models simultaneously (Architecture, Structure, MEP, HVAC, Fire Protection, etc.) without overwriting previously loaded models.
   - Client-side WebAssembly parsing powered by `web-ifc` and `@thatopen/components` (no model upload to external servers required).
 - **BCF 2.1 / 3.0 Clash & Issue Auditing (`web/`)**
-  - Import `.bcf` / `.bcfzip` archives exported from Navisworks, Solibri, BIMcollab, or Dalux.
+  - Import `.bcf` / `.bcfzip` archives exported from Navisworks, Trimble Connect, Solibri, BIMcollab, or Dalux.
   - Interactive 3D camera focusing on clash viewpoints, component highlighting by IFC GUID, status filtering, and snapshot previews.
   - Update issue statuses and export `.bcfzip` packages directly from the browser; imported archives retain their original attachments and version.
 - **Native Windows Desktop Host (`desktop/`)**
