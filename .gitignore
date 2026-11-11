@@ -1,0 +1,51 @@
+# Node / Web
+web/node_modules/
+web/dist/
+node_modules/
+dist/
+*.tsbuildinfo
+*.local
+
+# .NET / Desktop
+desktop/bin/
+desktop/obj/
+desktop/web-dist/
+desktop/*.WebView2/
+*.exe
+*.dll
+*.pdb
+*.user
+*.suo
+
+# Python / BCF Reporter
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Sensitive BIM / Client Project Files (NEVER COMMIT)
+*.ifc
+*.bcf
+*.bcfzip
+*.rvt
+*.dwg
+*.nwd
+*.nwc
+*.docx
+*.pdf
+*.xlsx
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+*.snk
+*.crt
+*.db
+*.sqlite
+*.sqlite3
+*.log
+_respaldo*/
+*.bak
