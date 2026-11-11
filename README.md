@@ -15,10 +15,10 @@
   - Client-side WebAssembly parsing powered by `web-ifc` and `@thatopen/components` (no model upload to external servers required).
 - **BCF 2.1 / 3.0 Clash & Issue Auditing (`web/`)**
   - Import `.bcf` / `.bcfzip` archives exported from Navisworks, Solibri, BIMcollab, or Dalux.
-  - Interactive 3D camera focusing on clash viewpoints, component selection/isolation by IFC GUID, status filtering, and snapshot previews.
-  - Create new issues and export updated `.bcfzip` packages directly from the browser.
+  - Interactive 3D camera focusing on clash viewpoints, component highlighting by IFC GUID, status filtering, and snapshot previews.
+  - Update issue statuses and export `.bcfzip` packages directly from the browser; imported archives retain their original attachments and version.
 - **Native Windows Desktop Host (`desktop/`)**
-  - Lightweight `.NET 10` (`net10.0-windows`) WPF shell embedding Microsoft Edge WebView2 with `SharedArrayBuffer` and an enlarged 4 GB JS heap limit for heavy federated IFC models.
+  - Lightweight `.NET 10` (`net10.0-windows`) WPF shell embedding Microsoft Edge WebView2 with a per-user browser profile and an enlarged 4 GB JS heap limit for heavy federated IFC models.
 - **Automated BCF Report Generator (`tools/bcf-report/`)**
   - Python CLI that parses `.bcf` / `.bcfzip` issues, extracts viewpoints, snapshots, involved IFC GUIDs, statuses, and comments, and generates structured `.docx` (and optional `.pdf` via Microsoft Word COM on Windows) audit reports.
 
@@ -45,11 +45,11 @@ bim-clash-auditor/
 
 ### 1. Web Viewer (`web/`)
 
-**Prerequisites:** Node.js 20+ (recommended 22 LTS) and npm.
+**Prerequisites:** Node.js 22.12+ (22 LTS recommended) and npm.
 
 ```bash
 cd web
-npm install
+npm ci
 npm run dev
 ```
 
@@ -90,7 +90,7 @@ See [tools/bcf-report/README.md](tools/bcf-report/README.md) for all CLI flags.
 1. Build the web frontend first and copy `web/dist/` to `desktop/web-dist/`:
    ```powershell
    cd web
-   npm install
+   npm ci
    npm run build
    New-Item -ItemType Directory -Force ..\desktop\web-dist | Out-Null
    Copy-Item -Recurse -Force dist\* ..\desktop\web-dist\
@@ -118,3 +118,54 @@ Contributions, bug reports, and OpenBIM workflow ideas are welcome! Please read 
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Development checks
+
+Run from the corresponding module directory:
+
+```bash
+# web/
+npm ci
+npm test
+npm run build
+
+# tools/bcf-report/
+python -m pip install -r requirements-dev.txt
+python -m py_compile bcf_to_report.py
+python -m pytest -q
+
+# desktop/ (Windows; copy web/dist to desktop/web-dist first)
+dotnet build BIMClashAuditor.csproj -c Release
+```
+
+CI runs web and Python regression tests before packaging the web application and
+building the Windows host. Tests generate small synthetic ZIP/XML fixtures in
+memory. Temporary report outputs are generated at test time, never committed.
+
+### Compatibility and current limits
+
+- The BCF reader handles the different 2.1 and 3.0 comment/label containers.
+  The viewer uses the first declared viewpoint and its referenced snapshot; it
+  does not yet provide a selector for all viewpoints. Missing references do not
+  silently resolve to a different declared attachment.
+- Imported exports retain the original ZIP entries and update topic statuses.
+  Parsing is not full XSD validation. Clipping planes, bitmaps and all BCF
+  visibility rules are not yet replayed by the viewer.
+- Camera coordinates use the reference model coordination matrix consistently.
+  Perspective FOV and orthographic scale are supported. BCF files exported in a
+  different local coordinate frame require matching IFC coordinates; coordinate
+  frames are no longer guessed from proximity to the building.
+- IFC batches are loaded sequentially. Failed parsing of a same-name replacement
+  preserves the previously loaded model. Large models still depend on available
+  browser/GPU memory; no fixed maximum model size is guaranteed.
+- Unit tests cover BCF parsing/export, camera transforms/framing, model lifecycle,
+  report content and COM cleanup. They do not replace interactive WebGL tests,
+  real IFC stress testing, or Word rendering checks on Windows.
+- The current upstream That Open/Three.js combination emits Vite warnings for
+  optional `TSL`/`NodeMaterial` exports. The IFC runtime also produces a large
+  bundle. These warnings remain visible and are not suppressed; a successful
+  build alone does not validate every rendering path.
+
+BCF structures are based on the buildingSMART
+[2.1 schema](https://github.com/buildingSMART/BCF-XML/tree/release_2_1/Schemas) and
+[3.0 schema](https://github.com/buildingSMART/BCF-XML/tree/release_3_0/Schemas).

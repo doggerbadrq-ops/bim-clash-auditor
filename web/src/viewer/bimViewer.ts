@@ -17,7 +17,7 @@ type Axis = 'X' | 'Y' | 'Z';
 export class BimViewer {
   public container: HTMLElement;
   public components: OBC.Components;
-  public world!: OBC.SimpleWorld<OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer>;
+  public world!: OBC.SimpleWorld<OBC.SimpleScene, OBC.OrthoPerspectiveCamera, OBC.SimpleRenderer>;
   public ifcLoader!: OBC.IfcLoader;
   public fragments!: OBC.FragmentsManager;
   public clipper!: OBC.Clipper;
@@ -56,7 +56,7 @@ export class BimViewer {
   public async init() {
     // 1. Mundo
     const worlds = this.components.get(OBC.Worlds);
-    this.world = worlds.create<OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer>();
+    this.world = worlds.create<OBC.SimpleScene, OBC.OrthoPerspectiveCamera, OBC.SimpleRenderer>();
 
     // 2. Escena
     this.world.scene = new OBC.SimpleScene(this.components);
@@ -74,7 +74,7 @@ export class BimViewer {
     this.world.renderer = new OBC.SimpleRenderer(this.components, this.container);
 
     // 4. Cámara
-    this.world.camera = new OBC.SimpleCamera(this.components);
+    this.world.camera = new OBC.OrthoPerspectiveCamera(this.components);
     this.world.camera.controls?.setLookAt(28, 24, 28, 0, 1.8, 0);
 
     const ctrl = this.world.camera.controls;
@@ -259,7 +259,7 @@ export class BimViewer {
   public async loadIfc(data: Uint8Array, fileName: string, onProgress: (fraction: number) => void, sizeMb = '') {
     // Si se vuelve a cargar el mismo archivo, se reemplaza solo esa disciplina
     const existing = [...this.models.values()].find(m => m.info.name === fileName);
-    if (existing) await this.removeModel(existing.info.id);
+    // Keep the previous model until the replacement has loaded successfully.
 
     const isFirstModel = this.models.size === 0;
     if (isFirstModel) {
@@ -289,6 +289,7 @@ export class BimViewer {
     this.removePlaceholder();
     this.models.set(id, { model, info: { id, name: fileName, sizeMb, visible: true } });
 
+    if (existing) await this.removeModel(existing.info.id);
     if (this.isTransparent) await model.setOpacity(undefined, 0.25);
     await this.fragments.core.update(true);
 
@@ -300,11 +301,15 @@ export class BimViewer {
   public async removeModel(id: string) {
     const entry = this.models.get(id);
     if (!entry) return;
+    await this.fragments.core.disposeModel(id);
     this.models.delete(id);
     this.world.scene.three.remove(entry.model.object);
-    await this.fragments.core.disposeModel(id);
+    this.wheelPivotCache = undefined;
     if (this.models.size === 0) {
       (this.fragments.core as any).baseCoordinates = null;
+      this.fragments.baseCoordinationMatrix.identity();
+      this.fragments.baseCoordinationModel = "";
+      this.clearAllClipPlanes();
       this.clearClashMarkers();
     }
     this.emitModelsChanged();
@@ -321,15 +326,8 @@ export class BimViewer {
 
   /** Cierra TODOS los modelos IFC y libera memoria */
   public async clearPreviousModels() {
-    for (const id of [...this.models.keys()]) {
-      const entry = this.models.get(id)!;
-      this.world.scene.three.remove(entry.model.object);
-      await this.fragments.core.disposeModel(id);
-    }
-    this.models.clear();
-    (this.fragments.core as any).baseCoordinates = null;
-    this.clearClashMarkers();
-    this.emitModelsChanged();
+    for (const id of [...this.models.keys()]) await this.removeModel(id);
+    this.clearAllClipPlanes();
   }
 
   private emitModelsChanged() {
@@ -384,7 +382,7 @@ export class BimViewer {
    * 1º intenta localizar los elementos por IfcGuid en TODOS los modelos cargados
    *    y encuadra su caja (método robusto, no depende de coordenadas).
    * 2º si no hay coincidencias, usa la cámara del viewpoint BCF convertida
-   *    de Z-arriba (BCF/IFC) a Y-arriba (Three.js) y al origen del modelo.
+   *    mediante la matriz de coordinación del modelo de referencia.
    * Devuelve qué método se usó, para informar al usuario.
    */
   public async focusClash(viewpoint?: BcfViewpointCamera, ifcGuids: string[] = []): Promise<'elements' | 'camera' | 'none' | 'no-model'> {
@@ -397,6 +395,8 @@ export class BimViewer {
     }
 
     // ── 1. Por elementos (IfcGuid) ──
+    if (viewpoint?.position) await this.applyBcfProjection(viewpoint);
+
     if (ifcGuids.length && this.models.size) {
       try {
         const map = await this.fragments.guidsToModelIdMap(ifcGuids);
@@ -412,6 +412,7 @@ export class BimViewer {
             if (!model) continue;
             box.union(await model.getMergedBox([...ids]));
           }
+          if (box.isEmpty()) throw new Error('Los elementos no tienen geometría visible.');
           await this.fragments.highlight({
             color: new THREE.Color('#E0301E'),
             renderedFaces: FRAGS.RenderedFaces.TWO,
@@ -426,7 +427,11 @@ export class BimViewer {
           // Si el BCF incluye posición de cámara, colocamos la cámara allí mirando al elemento
           if (viewpoint?.position) {
             const camPos = this.bcfPointToScene(viewpoint.position);
-            this.world.camera.controls.setLookAt(camPos.x, camPos.y, camPos.z, center.x, center.y, center.z, true);
+            const direction = this.bcfDirectionToScene(viewpoint);
+            const target = direction
+              ? camPos.clone().addScaledVector(direction, Math.max(camPos.distanceTo(center), 1))
+              : center;
+            await this.world.camera.controls.setLookAt(camPos.x, camPos.y, camPos.z, target.x, target.y, target.z, true);
           } else {
             const bcfDir = viewpoint ? this.bcfDirectionToScene(viewpoint, center) : null;
             this.frameBox(box, bcfDir ?? undefined);
@@ -466,89 +471,34 @@ export class BimViewer {
     return 'none';
   }
 
-  /**
-   * Transforma un punto BCF a la escena Three.js con selección inteligente del mejor espacio de coordenadas.
-   * Evalúa la matriz de coordinación de ThatOpen, transformaciones de ejes y coordenadas locales,
-   * escogiendo el candidato matemáticamente coherente con el volumen del edificio.
-   */
+  /** Use one coordination transform for all camera vectors, without spatial guessing. */
   private bcfPointToScene(p: { x: number; y: number; z: number }): THREE.Vector3 {
-    const sceneBox = this.getSceneBox(false);
-
-    // Candidato 1: Directo con matriz base de coordinación ThatOpen (Estándar nativo)
-    const vDirect = new THREE.Vector3(p.x, p.y, p.z);
-    if (this.models.size) this.fragments.applyBaseCoordinateSystem(vDirect, new THREE.Matrix4());
-
-    // Candidato 2: Z-up a Y-up manual transformado con la matriz base
-    const vSwapped = new THREE.Vector3(p.x, p.z, -p.y);
-    if (this.models.size) this.fragments.applyBaseCoordinateSystem(vSwapped, new THREE.Matrix4());
-
-    // Candidato 3: Directo crudo (BCFs con coordenadas locales al origen)
-    const vRaw = new THREE.Vector3(p.x, p.y, p.z);
-
-    // Candidato 4: Swapped crudo
-    const vRawSwapped = new THREE.Vector3(p.x, p.z, -p.y);
-
-    if (sceneBox.isEmpty()) return vDirect;
-
-    const candidates = [vDirect, vSwapped, vRaw, vRawSwapped];
-    let best = vDirect;
-    let minDistance = Infinity;
-
-    for (const cand of candidates) {
-      if (!Number.isFinite(cand.x) || !Number.isFinite(cand.y) || !Number.isFinite(cand.z)) continue;
-      const d = sceneBox.distanceToPoint(cand);
-      if (d < minDistance) {
-        minDistance = d;
-        best = cand;
-      }
-    }
-
-    return best.clone();
+    return new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(this.fragments.baseCoordinationMatrix);
   }
 
-  /**
-   * Transforma la dirección de vista del viewpoint BCF hacia la escena Three.js,
-   * orientándola siempre de forma coherente hacia el objetivo del modelo.
-   */
-  private bcfDirectionToScene(vp: BcfViewpointCamera, referencePos?: THREE.Vector3): THREE.Vector3 | null {
-    const d = vp.direction
-      ?? (vp.position && vp.target
-        ? { x: vp.target.x - vp.position.x, y: vp.target.y - vp.position.y, z: vp.target.z - vp.position.z }
-        : null);
+  private bcfDirectionToScene(vp: BcfViewpointCamera, _referencePos?: THREE.Vector3): THREE.Vector3 | null {
+    const d = vp.direction ?? (vp.position && vp.target
+      ? { x: vp.target.x - vp.position.x, y: vp.target.y - vp.position.y, z: vp.target.z - vp.position.z }
+      : null);
     if (!d) return null;
+    return new THREE.Vector3(d.x, d.y, d.z).transformDirection(this.fragments.baseCoordinationMatrix);
+  }
 
-    const rot = this.models.size ? new THREE.Matrix4().extractRotation(this.fragments.baseCoordinationMatrix) : null;
-
-    // Candidatos de dirección
-    const vDirect = new THREE.Vector3(d.x, d.y, d.z);
-    if (rot) vDirect.applyMatrix4(rot);
-    vDirect.normalize();
-
-    const vSwapped = new THREE.Vector3(d.x, d.z, -d.y);
-    if (rot) vSwapped.applyMatrix4(rot);
-    vSwapped.normalize();
-
-    const vRaw = new THREE.Vector3(d.x, d.y, d.z).normalize();
-    const vRawSwapped = new THREE.Vector3(d.x, d.z, -d.y).normalize();
-
-    const sceneBox = this.getSceneBox(false);
-    if (!sceneBox.isEmpty() && referencePos) {
-      const toCenter = sceneBox.getCenter(new THREE.Vector3()).sub(referencePos).normalize();
-      const candidates = [vDirect, vSwapped, vRaw, vRawSwapped];
-      let best = vDirect;
-      let maxDot = -Infinity;
-      for (const cand of candidates) {
-        if (!Number.isFinite(cand.x) || !Number.isFinite(cand.y) || !Number.isFinite(cand.z)) continue;
-        const dot = cand.dot(toCenter);
-        if (dot > maxDot) {
-          maxDot = dot;
-          best = cand;
-        }
-      }
-      return best.clone();
+  private async applyBcfProjection(vp: BcfViewpointCamera) {
+    const camera = this.world.camera;
+    await camera.projection.set(vp.projection ?? 'Perspective');
+    const active = camera.three;
+    if (vp.up) active.up.copy(new THREE.Vector3(vp.up.x, vp.up.y, vp.up.z)
+      .transformDirection(this.fragments.baseCoordinationMatrix));
+    camera.controls.updateCameraUp();
+    if (vp.projection === 'Orthographic' && vp.viewToWorldScale && vp.viewToWorldScale > 0) {
+      const ortho = camera.threeOrtho;
+      await camera.controls.zoomTo((ortho.top - ortho.bottom) / vp.viewToWorldScale, false);
+    } else {
+      camera.threePersp.fov = THREE.MathUtils.clamp(vp.fieldOfView ?? 60, 1, 179);
     }
-
-    return vDirect;
+    active.updateProjectionMatrix();
+    for (const { model } of this.models.values()) model.useCamera(active);
   }
 
   /** Encuadra una caja, opcionalmente mirando desde la dirección dada */
@@ -557,7 +507,12 @@ export class BimViewer {
     const radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 0.75);
     const cam = this.world.camera.three as THREE.PerspectiveCamera;
     const fov = THREE.MathUtils.degToRad(cam.fov ?? 60);
-    const dist = (radius / Math.sin(fov / 2)) * 1.35;
+    const horizontalFov = 2 * Math.atan(Math.tan(fov / 2) * (cam.aspect || 1));
+    const dist = (radius / Math.sin(Math.min(fov, horizontalFov) / 2)) * 1.35;
+    if (this.world.camera.projection.current === 'Orthographic') {
+      const ortho = this.world.camera.threeOrtho;
+      void this.world.camera.controls.zoomTo(Math.min(ortho.right - ortho.left, ortho.top - ortho.bottom) / (radius * 2.7), true);
+    }
     const dir = (viewDir?.clone() ?? new THREE.Vector3(-0.6, -0.5, -0.6)).normalize();
     const pos = center.clone().addScaledVector(dir, -dist);
     this.world.camera.controls.setLookAt(pos.x, pos.y, pos.z, center.x, center.y, center.z, true);
@@ -651,13 +606,7 @@ export class BimViewer {
   public fitModelToFrame() {
     const box = this.getSceneBox();
     if (box.isEmpty()) return;
-    const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(...box.getSize(new THREE.Vector3()).toArray());
-    const dist = Math.max(maxDim * 1.6, 12);
-    this.world.camera.controls.setLookAt(
-      center.x + dist * 0.65, center.y + dist * 0.55, center.z + dist * 0.65,
-      center.x, center.y, center.z, true
-    );
+    this.frameBox(box);
   }
 
   public resetView() { this.fitModelToFrame(); }
@@ -906,13 +855,19 @@ export class BimViewer {
     this.world?.renderer?.resize(undefined);
     const cam = this.world?.camera?.three as THREE.PerspectiveCamera;
     if (cam?.isPerspectiveCamera) {
-      cam.aspect = this.container.clientWidth / this.container.clientHeight;
+      cam.aspect = this.container.clientWidth / Math.max(this.container.clientHeight, 1);
       cam.updateProjectionMatrix();
     }
   };
 
   public async dispose() {
     window.removeEventListener('resize', this.onResize);
+    const dom = this.world?.renderer?.three.domElement;
+    dom?.removeEventListener('wheel', this.onWheel);
+    dom?.removeEventListener('pointerdown', this.onScissorsPointerDown);
+    dom?.removeEventListener('pointerup', this.onScissorsPointerUp);
+    this.pendingWheel = 0;
+    this.lastWheelEvent = undefined;
     await this.clearPreviousModels();
     this.removePlaceholder();
     this.gridHelper?.dispose();

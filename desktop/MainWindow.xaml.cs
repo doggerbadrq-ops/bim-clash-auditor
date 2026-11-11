@@ -11,16 +11,18 @@ namespace BIMClashAuditor
         {
             InitializeComponent();
             Loaded += MainWindow_Loaded;
+            Closed += (_, _) => webView.Dispose();
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             try
             {
-                // Enable modern features with 4GB memory buffer for heavy IFC models
-                var env = await CoreWebView2Environment.CreateAsync(null, null, new CoreWebView2EnvironmentOptions
+                // Keep the browser profile writable when installed under Program Files.
+                string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BIMClashAuditor", "WebView2");
+                var env = await CoreWebView2Environment.CreateAsync(null, profile, new CoreWebView2EnvironmentOptions
                 {
-                    AdditionalBrowserArguments = "--enable-features=SharedArrayBuffer --allow-file-access-from-files --js-flags=\"--max-old-space-size=4096\""
+                    AdditionalBrowserArguments = "--js-flags=\"--max-old-space-size=4096\""
                 });
 
                 await webView.EnsureCoreWebView2Async(env);
@@ -38,6 +40,16 @@ namespace BIMClashAuditor
 
                 webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                     "bimclash.local", distPath, CoreWebView2HostResourceAccessKind.DenyCors);
+                webView.CoreWebView2.NavigationStarting += (_, args) =>
+                {
+                    if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri) ||
+                        uri.Scheme != "https" || uri.Host != "bimclash.local") args.Cancel = true;
+                };
+                webView.CoreWebView2.NavigationCompleted += (_, args) =>
+                {
+                    if (!args.IsSuccess) MessageBox.Show("No se pudo cargar la interfaz local: " + args.WebErrorStatus,
+                        "BIM Clash Auditor", MessageBoxButton.OK, MessageBoxImage.Error);
+                };
                 webView.CoreWebView2.Navigate("https://bimclash.local/index.html");
             }
             catch (Exception ex)

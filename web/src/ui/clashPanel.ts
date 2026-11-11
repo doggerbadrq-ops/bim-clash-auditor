@@ -200,6 +200,7 @@ export class ClashPanel {
             <div class="status-select-wrapper">
               <span class="status-indicator-dot status-dot-${statusClass}"></span>
               <select aria-label="Estado de la incidencia" class="card-status-select" data-guid="${escapeHtml(issue.guid)}">
+                <option value="Open" ${issue.status === 'Open' ? 'selected' : ''}>Abierta</option>
                 <option value="Active" ${issue.status === 'Active' ? 'selected' : ''}>Activa</option>
                 <option value="In Review" ${issue.status === 'In Review' ? 'selected' : ''}>En Revisión</option>
                 <option value="Resolved" ${issue.status === 'Resolved' ? 'selected' : ''}>Resuelta</option>

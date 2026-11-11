@@ -49,3 +49,7 @@ venv/
 *.log
 _respaldo*/
 *.bak
+
+# Automated test caches
+.pytest_cache/
+coverage/

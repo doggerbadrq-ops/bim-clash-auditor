@@ -130,6 +130,9 @@ export class DropZoneHandler {
           await new Promise(resolve => setTimeout(resolve, 60));
 
           this.clashPanel.render(issues);
+          if (this.bcfManager.skippedTopics) {
+            showToast(`${this.bcfManager.skippedTopics} incidencias omitidas por datos BCF inválidos. Consulta la consola para el detalle.`, 'warning', 6000);
+          }
 
           setProgress(`Incidencias BCF sincronizadas`, 100);
           await new Promise(resolve => setTimeout(resolve, 120));

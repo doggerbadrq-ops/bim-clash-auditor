@@ -12,10 +12,12 @@ import re
 import shutil
 import tempfile
 import zipfile
+import warnings
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from docx import Document
+from docx.image.exceptions import UnrecognizedImageError, UnexpectedEndOfFileError
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement, parse_xml
@@ -87,18 +89,25 @@ def detect_discipline(text: str) -> str:
 
 
 def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
+    """Read topics from a path or binary stream; warn about invalid optional content.
+
+    Snapshots are written only to generated filenames in temp_img_dir.
+    Empty or entirely unreadable archives raise ValueError.
+    """
     topics = []
     with zipfile.ZipFile(bcf_path) as zf:
-        markup_files = sorted([f for f in zf.namelist() if f.endswith("/markup.bcf")])
+        markup_files = sorted([f for f in zf.namelist() if f.lower().endswith(("/markup.bcf", "/markup.xml"))])
         for idx, markup_file in enumerate(markup_files, 1):
-            folder = markup_file.split("/")[0]
+            folder = markup_file.rsplit("/", 1)[0]
             try:
                 root = ET.fromstring(zf.read(markup_file))
-            except Exception:
+            except ET.ParseError:
+                warnings.warn(f"Skipping malformed markup: {markup_file}", stacklevel=2)
                 continue
 
             topic = root.find("Topic")
             if topic is None:
+                warnings.warn(f"Skipping markup without Topic: {markup_file}", stacklevel=2)
                 continue
 
             guid = topic.get("Guid") or folder
@@ -111,7 +120,7 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
             assigned_to = topic.findtext("AssignedTo", "Unassigned")
 
             comments = []
-            for c in root.findall("Comment"):
+            for c in root.findall("Comment") + topic.findall("Comments/Comment"):
                 c_text = (c.findtext("Comment") or "").strip()
                 if c_text:
                     comments.append({
@@ -120,10 +129,23 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
                         "date": (c.findtext("Date") or "")[:10],
                     })
 
-            snap_files = [
-                n for n in zf.namelist()
-                if n.startswith(folder + "/") and n.lower().endswith((".png", ".jpg", ".jpeg"))
-            ]
+            references = root.findall("Viewpoints") + topic.findall("Viewpoints/ViewPoint")
+            def referenced_files(tag, extensions):
+                names = [ref.findtext(tag) for ref in references if ref.findtext(tag)]
+                if names:
+                    result = []
+                    for name in names:
+                        name = name.strip()
+                        candidate = f"{folder}/{name}"
+                        if ".." in name or "\\" in name or name.startswith("/") or candidate not in zf.namelist():
+                            warnings.warn(f"Missing or unsafe {tag} reference", stacklevel=2)
+                            continue
+                        result.append(candidate)
+                    return result
+                return sorted(n for n in zf.namelist()
+                              if n.startswith(folder + "/") and n.lower().endswith(extensions))
+
+            snap_files = referenced_files("Snapshot", (".png", ".jpg", ".jpeg"))
             saved_snapshot = None
             if snap_files:
                 ext = os.path.splitext(snap_files[0])[1]
@@ -132,10 +154,7 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
                     sf.write(zf.read(snap_files[0]))
                 saved_snapshot = snap_path
 
-            vp_files = [
-                n for n in zf.namelist()
-                if n.startswith(folder + "/") and n.lower().endswith(".bcfv")
-            ]
+            vp_files = referenced_files("Viewpoint", (".bcfv",))
             ifc_guids = set()
             revit_ids = set()
 
@@ -150,7 +169,7 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
                         g = comp.get("IfcGuid")
                         if g:
                             ifc_guids.add(g)
-                        aid = comp.get("AuthoringToolId") or comp.get("OriginatingSystemId")
+                        aid = comp.findtext("AuthoringToolId") or comp.get("AuthoringToolId") or comp.get("OriginatingSystemId")
                         if aid and re.match(r"^\d+$", aid):
                             revit_ids.add(aid)
 
@@ -160,11 +179,11 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
                             g = comp.get("IfcGuid")
                             if g:
                                 ifc_guids.add(g)
-                            aid = comp.get("AuthoringToolId") or comp.get("OriginatingSystemId")
+                            aid = comp.findtext("AuthoringToolId") or comp.get("AuthoringToolId") or comp.get("OriginatingSystemId")
                             if aid and re.match(r"^\d+$", aid):
                                 revit_ids.add(aid)
-                except Exception:
-                    pass
+                except ET.ParseError:
+                    warnings.warn(f"Skipping malformed viewpoint: {v_file}", stacklevel=2)
 
             topics.append({
                 "index": idx,
@@ -183,6 +202,8 @@ def parse_bcf(bcf_path: str, temp_img_dir: str) -> list[dict]:
                 "revit_ids": sorted(revit_ids),
             })
 
+    if not topics:
+        raise ValueError("The archive contains no readable BCF topics.")
     return topics
 
 
@@ -316,7 +337,11 @@ def export_docx(topics: list[dict], source_name: str, output_docx: str) -> None:
         p_img = c1.paragraphs[0]
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
         if t["snapshot"] and os.path.exists(t["snapshot"]):
-            p_img.add_run().add_picture(t["snapshot"], width=Inches(5.5))
+            try:
+                p_img.add_run().add_picture(t["snapshot"], width=Inches(5.5))
+            except (ValueError, OSError, UnrecognizedImageError, UnexpectedEndOfFileError):
+                warnings.warn("Snapshot is unreadable; report continues without it.", stacklevel=2)
+                p_img.add_run("[Snapshot unavailable]")
         else:
             p_img.add_run("[No snapshot available]")
 
@@ -358,9 +383,12 @@ def convert_docx_to_pdf(input_docx: str, output_pdf: str) -> None:
     import win32com.client
 
     pythoncom.CoInitialize()
-    word = win32com.client.DispatchEx("Word.Application")
-    word.Visible = False
+    word = None
+    doc_word = None
     try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
         doc_word = word.Documents.Open(os.path.abspath(input_docx))
         doc_word.ExportAsFixedFormat(
             OutputFileName=os.path.abspath(output_pdf),
@@ -370,9 +398,16 @@ def convert_docx_to_pdf(input_docx: str, output_pdf: str) -> None:
             CreateBookmarks=1,
             DocStructureTags=True,
         )
-        doc_word.Close(False)
     finally:
-        word.Quit()
+        try:
+            if doc_word is not None:
+                doc_word.Close(False)
+        finally:
+            try:
+                if word is not None:
+                    word.Quit()
+            finally:
+                pythoncom.CoUninitialize()
 
 
 def main() -> None:
@@ -391,6 +426,8 @@ def main() -> None:
             pdf_path = os.path.splitext(args.output)[0] + ".pdf"
             convert_docx_to_pdf(args.output, pdf_path)
             print(f"PDF generated: {pdf_path}")
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        parser.exit(1, f"Error: {exc}\n")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

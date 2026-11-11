@@ -6,6 +6,9 @@ export interface ClashElementRef {
 }
 
 export interface BcfViewpointCamera {
+  projection?: 'Perspective' | 'Orthographic';
+  fieldOfView?: number;
+  viewToWorldScale?: number;
   position?: { x: number; y: number; z: number };
   target?: { x: number; y: number; z: number };
   direction?: { x: number; y: number; z: number };

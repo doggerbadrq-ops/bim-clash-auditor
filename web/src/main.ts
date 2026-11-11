@@ -1,7 +1,7 @@
 ﻿import './style.css';
 import { supportBundledIfcBinding } from './viewer/webIfcCompatibility';
 import JSZip from 'jszip';
-import { BimViewer, LoadedModelInfo } from './viewer/bimViewer';
+import type { BimViewer, LoadedModelInfo } from './viewer/bimViewer';
 import { BcfManager } from './bcf/bcfManager';
 import { ClashPanel } from './ui/clashPanel';
 import { DropZoneHandler } from './ui/dropZone';
@@ -21,6 +21,7 @@ async function bootstrap() {
 
 
   // 1. Initialize 3D Viewer with That Open Company
+  const { BimViewer } = await import('./viewer/bimViewer');
   const viewer = new BimViewer(container);
   initThemeManager(() => viewer.applyTheme());
   supportBundledIfcBinding();
@@ -139,7 +140,12 @@ async function bootstrap() {
   // Export / Download .bcfzip button
   const btnExportBcf = document.getElementById('btn-export-bcf');
   btnExportBcf?.addEventListener('click', async () => {
-    await exportBcfZip(bcfManager);
+    try {
+      await exportBcfZip(bcfManager);
+    } catch (error) {
+      console.error('Error exportando BCF:', error);
+      showToast('No se pudo exportar el archivo BCF.', 'error', 5000);
+    }
   });
 
   // Botón Descargar / Cerrar IFC para liberar memoria RAM
@@ -355,7 +361,7 @@ async function exportBcfZip(bcfManager: BcfManager) {
 
   // 1. bcf.version
   zip.file('bcf.version', `<?xml version="1.0" encoding="UTF-8"?>
-<Version VersionId="2.1" detailedVersion="2.1">
+<Version VersionId="2.1">
   <DetailedVersion>2.1</DetailedVersion>
 </Version>`);
 
@@ -367,31 +373,33 @@ async function exportBcfZip(bcfManager: BcfManager) {
     // markup.bcf
     const markupXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Markup xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <Header>
-    <File IfcProject="OpenBIM-Federated-Project" Date="${issue.creationDate}">
-      <Filename>Federated_Model.ifc</Filename>
-    </File>
-  </Header>
   <Topic Guid="${issue.guid}" TopicType="${issue.type}" TopicStatus="${issue.status}">
     <Title>${escapeXml(issue.title)}</Title>
     <Priority>${issue.priority}</Priority>
     <Index>${issue.index}</Index>
     <CreationDate>${issue.creationDate}</CreationDate>
     <CreationAuthor>${escapeXml(issue.author)}</CreationAuthor>
-    <Description>${escapeXml(issue.description)}</Description>
     ${issue.assignedTo ? `<AssignedTo>${escapeXml(issue.assignedTo)}</AssignedTo>` : ''}
+    <Description>${escapeXml(issue.description)}</Description>
     ${issue.labels.map(l => `<Labels>${escapeXml(l)}</Labels>`).join('\n    ')}
-    <Viewpoints Guid="vp-${issue.guid}">
+  </Topic>
+    <Viewpoints Guid="${issue.guid}">
       <Viewpoint>viewpoint.bcfv</Viewpoint>
     </Viewpoints>
-  </Topic>
 </Markup>`;
     folder.file('markup.bcf', markupXml);
 
     // viewpoint.bcfv
     const vp = issue.viewpoint || { position: { x: 12, y: 16, z: 3.5 }, target: { x: 0, y: 0, z: 0 } };
     const vpXml = `<?xml version="1.0" encoding="UTF-8"?>
-<VisualizationInfo Guid="vp-${issue.guid}">
+<VisualizationInfo Guid="${issue.guid}">
+  <Components>
+    <Selection>
+      ${issue.ifcGuids.map((g, idx) => `
+        <Component IfcGuid="${escapeXml(g)}"><OriginatingSystem>BIM Clash Auditor</OriginatingSystem><AuthoringToolId>${escapeXml(issue.elementIds[idx] || '')}</AuthoringToolId></Component>
+      `).join('')}
+    </Selection>
+  </Components>
   <PerspectiveCamera>
     <CameraViewPoint>
       <X>${vp.position?.x ?? 0}</X>
@@ -410,13 +418,7 @@ async function exportBcfZip(bcfManager: BcfManager) {
     </CameraUpVector>
     <FieldOfView>60</FieldOfView>
   </PerspectiveCamera>
-  <Components>
-    <Selection>
-      ${issue.ifcGuids.map((g, idx) => `
-        <Component IfcGuid="${g}" AuthoringToolId="${issue.elementIds[idx] || ''}" OriginatingSystem="Autodesk Revit 2026"/>
-      `).join('')}
-    </Selection>
-  </Components>
+
 </VisualizationInfo>`;
     folder.file('viewpoint.bcfv', vpXml);
   }
@@ -448,4 +450,9 @@ function escapeXml(unsafe: string): string {
   });
 }
 
-window.addEventListener('DOMContentLoaded', bootstrap);
+window.addEventListener('DOMContentLoaded', () => {
+  void bootstrap().catch(error => {
+    console.error('Error inicializando el visor:', error);
+    showToast('No se pudo iniciar el visor 3D. Comprueba WebGL y recarga la aplicación.', 'error', 10000);
+  });
+});

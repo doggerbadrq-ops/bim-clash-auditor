@@ -7,10 +7,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run --environment jsdom"
   },
   "dependencies": {
     "@thatopen/components": "^3.6.0",
+    "@thatopen/fragments": "^3.6.0",
     "jszip": "^3.10.2",
     "three": "^0.187.0",
     "web-ifc": "^0.0.78"
@@ -18,7 +20,9 @@
   "devDependencies": {
     "@types/jszip": "^3.4.0",
     "@types/three": "^0.187.0",
+    "jsdom": "^31.0.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.6"
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
   }
 }

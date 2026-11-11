@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import { ClashIssue, BcfViewpointCamera } from '../types';
 
 export class BcfManager {
+  public skippedTopics = 0;
   private activeIssues: ClashIssue[] = [];
   private createdBlobUrls: string[] = [];
   private sourceZip?: JSZip;
@@ -72,10 +73,12 @@ export class BcfManager {
       }
     }
 
+    this.skippedTopics = 0;
     const issues: ClashIssue[] = [];
     let issueCounter = 1;
 
     for (const folder of Array.from(topicFolders)) {
+      const urlCheckpoint = this.createdBlobUrls.length;
       try {
         const markupFile = loadedZip.file(`${folder}/markup.bcf`) || loadedZip.file(`${folder}/markup.xml`);
         if (!markupFile) continue;
@@ -87,6 +90,8 @@ export class BcfManager {
           issueCounter++;
         }
       } catch (err) {
+        this.skippedTopics++;
+        for (const url of this.createdBlobUrls.splice(urlCheckpoint)) URL.revokeObjectURL(url);
         console.warn(`Error parsing BCF topic folder "${folder}":`, err);
       }
     }
@@ -107,9 +112,10 @@ export class BcfManager {
   private async parseBcfFolder(zip: JSZip, folder: string, markupXml: string, index: number): Promise<ClashIssue | null> {
     const parser = new DOMParser();
     const doc = parser.parseFromString(markupXml, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('XML BCF inválido.');
 
     const topicEl = doc.querySelector('Topic');
-    if (!topicEl) return null;
+    if (!topicEl) throw new Error('Falta el elemento Topic.');
 
     const guid = topicEl.getAttribute('Guid') || folder;
     const title = topicEl.querySelector('Title')?.textContent?.trim() || `Incidencia #${index}`;
@@ -122,7 +128,7 @@ export class BcfManager {
     const assignedTo = topicEl.querySelector('AssignedTo')?.textContent?.trim() || undefined;
 
     // Labels
-    const labelElements = doc.querySelectorAll('Labels');
+    const labelElements = doc.querySelectorAll('Labels > Label, Labels:not(:has(Label))');
     const labels: string[] = [];
     labelElements.forEach(el => {
       const txt = el.textContent?.trim();
@@ -135,8 +141,18 @@ export class BcfManager {
     const elementIds: Set<string> = new Set();
     const ifcGuids: Set<string> = new Set();
 
-    // Look for snapshot image in the topic folder
-    const snapshotFile = zip.file(new RegExp(`^${folder}/.*\\.(png|jpg|jpeg)$`, 'i'))[0];
+    // Use the same declared viewpoint for camera and snapshot (BCF 2.1 / 3.0).
+    const reference = doc.querySelector('Markup > Viewpoints, Topic > Viewpoints > ViewPoint');
+    const resolve = (tag: string, pattern: RegExp) => {
+      const name = reference?.querySelector(tag)?.textContent?.trim();
+      if (name) {
+        if (name.includes('..') || name.includes('\\') || name.startsWith('/')) return null;
+        return zip.file(`${folder}/${name}`);
+      }
+      return Object.values(zip.files).find(file =>
+        !file.dir && file.name.startsWith(`${folder}/`) && pattern.test(file.name)) ?? null;
+    };
+    const snapshotFile = resolve('Snapshot', /\.(png|jpe?g)$/i);
     if (snapshotFile) {
       const imgBytes = await snapshotFile.async('uint8array');
       const mime = snapshotFile.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
@@ -147,12 +163,13 @@ export class BcfManager {
     }
 
     // Look for viewpoint XML (.bcfv)
-    const viewpointFile = zip.file(new RegExp(`^${folder}/.*\\.bcfv$`, 'i'))[0];
+    const viewpointFile = resolve('Viewpoint', /\.bcfv$/i);
     if (viewpointFile) {
       const vXml = await viewpointFile.async('string');
       const vDoc = parser.parseFromString(vXml, 'application/xml');
 
       // Camera
+      if (vDoc.querySelector('parsererror')) throw new Error('Viewpoint XML inválido.');
       const pCam = vDoc.querySelector('PerspectiveCamera') || vDoc.querySelector('OrthogonalCamera');
       if (pCam) {
         const cx = parseFloat(pCam.querySelector('CameraViewPoint > X')?.textContent || '0');
@@ -166,11 +183,24 @@ export class BcfManager {
         const uy = parseFloat(pCam.querySelector('CameraUpVector > Y')?.textContent || '0');
         const uz = parseFloat(pCam.querySelector('CameraUpVector > Z')?.textContent || '1');
 
+        const values = [cx, cy, cz, dx, dy, dz, ux, uy, uz];
+        if (!values.every(Number.isFinite) || Math.hypot(dx, dy, dz) === 0 || Math.hypot(ux, uy, uz) === 0) {
+          throw new Error('Cámara BCF inválida.');
+        }
+        const fieldOfView = Number(pCam.querySelector('FieldOfView')?.textContent ?? 60);
+        const scaleText = pCam.querySelector('ViewToWorldScale')?.textContent;
+        const scale = scaleText == null ? undefined : Number(scaleText);
+        if (!Number.isFinite(fieldOfView) || fieldOfView <= 0 || fieldOfView >= 180 ||
+            (scale !== undefined && (!Number.isFinite(scale) || scale <= 0))) {
+          throw new Error('Proyección BCF inválida.');
+        }
         cameraViewpoint = {
           position: { x: cx, y: cy, z: cz },
           direction: { x: dx, y: dy, z: dz },
           up: { x: ux, y: uy, z: uz },
-          target: { x: cx + dx * 12, y: cy + dy * 12, z: cz + dz * 12 },
+          projection: pCam.tagName === 'OrthogonalCamera' ? 'Orthographic' : 'Perspective',
+          fieldOfView,
+          viewToWorldScale: scale,
         };
       }
 
@@ -201,7 +231,7 @@ export class BcfManager {
         const ifcGuid = c.getAttribute('IfcGuid') || c.getAttribute('ifcGuid');
         if (ifcGuid) ifcGuids.add(ifcGuid);
 
-        const revitId = c.getAttribute('AuthoringToolId') || c.getAttribute('OriginatingSystemId');
+        const revitId = c.querySelector('AuthoringToolId')?.textContent?.trim() || c.getAttribute('AuthoringToolId') || c.getAttribute('OriginatingSystemId');
         if (revitId && /^\d+$/.test(revitId)) elementIds.add(revitId);
       });
     }
@@ -215,7 +245,7 @@ export class BcfManager {
     }
 
     // Comments
-    const commentsCount = doc.querySelectorAll('Comment').length;
+    const commentsCount = doc.querySelectorAll('Markup > Comment, Comments > Comment').length;
     doc.querySelectorAll('Comment > Comment').forEach(comm => {
       const cTxt = comm.textContent || '';
       let cMatch;

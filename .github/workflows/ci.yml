@@ -21,6 +21,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Unit tests
+        run: npm test
       - name: Typecheck & build
         run: npm run build
       - name: Upload web dist artifact
@@ -40,11 +42,12 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Syntax check & CLI help check
         run: |
           python -m py_compile bcf_to_report.py
           python bcf_to_report.py --help
+          python -m pytest -q
 
   desktop:
     needs: web
